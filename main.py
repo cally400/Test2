@@ -25,19 +25,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== إعدادات API ichancy ==========
-AGENT_USERNAME = os.getenv("AGENT_USERNAME")
-AGENT_PASSWORD = os.getenv("AGENT_PASSWORD")
-PARENT_ID = os.getenv("PARENT_ID")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# استخدام القيم من البيئة
+AGENT_USERNAME = os.getenv("AGENT_USERNAME", "")
+AGENT_PASSWORD = os.getenv("AGENT_PASSWORD", "")
+PARENT_ID = os.getenv("PARENT_ID", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-# قيم افتراضية للتنمية المحلية
+# إذا كان التوكن باسم مختلف
 if not BOT_TOKEN:
-    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", os.getenv("TOKEN", ""))
 
-if not all([AGENT_USERNAME, AGENT_PASSWORD, PARENT_ID, BOT_TOKEN]):
-    logger.error("❌ Missing required environment variables!")
-    logger.error("Required: AGENT_USERNAME, AGENT_PASSWORD, PARENT_ID, BOT_TOKEN")
+# التحقق من المتغيرات المطلوبة
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN is required!")
+    logger.error("Please set BOT_TOKEN environment variable")
     exit(1)
+
+# تحذير إذا كانت المتغيرات الأخرى مفقودة (لا نوقف التشغيل لأن البوت قد يعمل جزئياً)
+if not AGENT_USERNAME or not AGENT_PASSWORD or not PARENT_ID:
+    logger.warning("⚠️  Ichancy API credentials are missing!")
+    logger.warning("Some features may not work properly")
 
 ORIGIN = "https://agents.ichancy.com"
 SIGNIN_URL = ORIGIN + "/global/api/User/signIn"
@@ -57,18 +64,12 @@ REFERER = ORIGIN + "/dashboard"
 # ========== قاعدة البيانات ==========
 class Database:
     def __init__(self):
-        self.db_path = os.getenv("DATABASE_URL", "sqlite:///ichancy_bot.db")
+        # في Railway، استخدم SQLite المحلي
+        self.db_path = "ichancy_bot.db"
         self.init_db()
     
     def get_connection(self):
-        if self.db_path.startswith("sqlite"):
-            # استخراج مسار SQLite من السلسلة
-            path = self.db_path.replace("sqlite:///", "")
-            return sqlite3.connect(path)
-        else:
-            # لـ PostgreSQL أو MySQL
-            import psycopg2
-            return psycopg2.connect(self.db_path)
+        return sqlite3.connect(self.db_path, check_same_thread=False)
     
     def init_db(self):
         conn = self.get_connection()
@@ -88,7 +89,7 @@ class Database:
             # جدول حسابات ichancy
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS ichancy_accounts (
-                    id SERIAL PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT,
                     player_id TEXT,
                     login TEXT UNIQUE,
@@ -102,7 +103,7 @@ class Database:
             # جدول المعاملات
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS transactions (
-                    id SERIAL PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT,
                     player_id TEXT,
                     type TEXT,
@@ -125,7 +126,7 @@ class Database:
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "INSERT INTO users (user_id, username) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
+                "INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
                 (user_id, username)
             )
             conn.commit()
@@ -140,7 +141,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT balance FROM users WHERE user_id = %s", (user_id,))
+            cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
             result = cursor.fetchone()
             return result[0] if result else 0
         except Exception as e:
@@ -153,7 +154,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT balance FROM users WHERE user_id = %s", (user_id,))
+            cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
             result = cursor.fetchone()
             if not result:
                 return False
@@ -169,7 +170,7 @@ class Database:
                 new_balance = amount
             
             cursor.execute(
-                "UPDATE users SET balance = %s WHERE user_id = %s",
+                "UPDATE users SET balance = ? WHERE user_id = ?",
                 (new_balance, user_id)
             )
             conn.commit()
@@ -188,7 +189,7 @@ class Database:
             cursor.execute('''
                 INSERT INTO ichancy_accounts 
                 (user_id, player_id, login, password, email, initial_balance, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (user_id, player_id, login, password, email, initial_balance, datetime.now()))
             conn.commit()
             return True
@@ -203,7 +204,7 @@ class Database:
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "SELECT * FROM ichancy_accounts WHERE user_id = %s ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM ichancy_accounts WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
                 (user_id,)
             )
             result = cursor.fetchone()
@@ -262,7 +263,27 @@ class IchancyAPI:
         except Exception as e:
             logger.error(f"Error saving cookies: {e}")
     
+    def safe_request(self, method, url, **kwargs):
+        """وظيفة آمنة للطلبات مع معالجة الأخطاء"""
+        try:
+            response = self.scraper.request(method, url, **kwargs)
+            
+            # محاولة تحويل الرد إلى JSON
+            try:
+                data = response.json()
+                return response, data
+            except:
+                return response, {"raw_response": response.text[:200]}
+                
+        except Exception as e:
+            logger.error(f"Request error to {url}: {e}")
+            return None, {"error": str(e)}
+    
     def login_to_agent(self):
+        """تسجيل الدخول إلى وكيل Ichancy"""
+        if not AGENT_USERNAME or not AGENT_PASSWORD:
+            return False, {"error": "Agent credentials not configured"}
+        
         payload = {"username": AGENT_USERNAME, "password": AGENT_PASSWORD}
         headers = {
             "Content-Type": "application/json",
@@ -271,26 +292,29 @@ class IchancyAPI:
             "Referer": REFERER
         }
         
-        try:
-            resp = self.scraper.post(SIGNIN_URL, json=payload, headers=headers, timeout=30)
-            data = resp.json()
-            
-            if data.get("result", False):
-                self.save_cookies()
-                self.is_logged_in = True
-                return True, data
-            return False, data
-        except Exception as e:
-            logger.error(f"Login error: {e}")
-            return False, {"error": str(e)}
+        response, data = self.safe_request("POST", SIGNIN_URL, json=payload, headers=headers)
+        
+        if response is None:
+            return False, {"error": "Network error"}
+        
+        if isinstance(data, dict) and data.get("result", False):
+            self.save_cookies()
+            self.is_logged_in = True
+            return True, data
+        else:
+            error_msg = data.get("error", "Unknown error") if isinstance(data, dict) else "Invalid response"
+            return False, {"error": error_msg}
     
     def ensure_login(self):
+        """التأكد من تسجيل الدخول"""
         if not self.is_logged_in:
             success, data = self.login_to_agent()
             if not success:
-                raise Exception(f"فشل تسجيل الدخول: {data}")
+                error_msg = data.get("error", "Login failed") if isinstance(data, dict) else "Login failed"
+                raise Exception(f"فشل تسجيل الدخول: {error_msg}")
     
     def with_retry(func):
+        """ديكوراتور لإعادة المحاولة"""
         def wrapper(self, *args, **kwargs):
             try:
                 self.ensure_login()
@@ -298,14 +322,23 @@ class IchancyAPI:
             except Exception as e:
                 logger.error(f"API error in {func.__name__}: {e}")
                 self.is_logged_in = False
-                self.ensure_login()
-                return func(self, *args, **kwargs)
+                try:
+                    self.ensure_login()
+                    return func(self, *args, **kwargs)
+                except Exception as retry_error:
+                    logger.error(f"Retry failed in {func.__name__}: {retry_error}")
+                    return {"success": False, "error": str(retry_error)}
         return wrapper
     
     @with_retry
     def create_player_with_credentials(self, login: str, password: str):
+        """إنشاء حساب جديد"""
+        if not PARENT_ID:
+            return {"success": False, "error": "Parent ID not configured"}
+        
         email = f"{login}@TSA.com"
         
+        # التحقق من توفر الإيميل
         counter = 1
         while self.check_email_exists(email):
             email = f"{login}_{counter}@TSA.com"
@@ -327,10 +360,12 @@ class IchancyAPI:
             "Referer": REFERER
         }
         
-        resp = self.scraper.post(CREATE_URL, json=payload, headers=headers, timeout=30)
-        data = resp.json()
+        response, data = self.safe_request("POST", CREATE_URL, json=payload, headers=headers)
         
-        if data.get("result", False):
+        if response is None:
+            return {"success": False, "error": "Network error"}
+        
+        if isinstance(data, dict) and data.get("result", False):
             player_id = self.get_player_id_by_login(login)
             return {
                 "success": True,
@@ -341,12 +376,18 @@ class IchancyAPI:
                 "data": data
             }
         else:
-            return {
-                "success": False,
-                "error": data.get("notification", [{}])[0].get("content", "فشل إنشاء الحساب")
-            }
+            # استخراج رسالة الخطأ بأمان
+            error_msg = "فشل إنشاء الحساب"
+            if isinstance(data, dict):
+                notifications = data.get("notification", [])
+                if notifications and isinstance(notifications, list) and len(notifications) > 0:
+                    if isinstance(notifications[0], dict):
+                        error_msg = notifications[0].get("content", error_msg)
+            
+            return {"success": False, "error": error_msg}
     
     def get_player_id_by_login(self, login: str):
+        """الحصول على player_id من خلال login"""
         payload = {"page": 1, "pageSize": 100, "filter": {"login": login}}
         headers = {
             "Content-Type": "application/json",
@@ -355,17 +396,20 @@ class IchancyAPI:
             "Referer": REFERER
         }
         
-        resp = self.scraper.post(STATISTICS_URL, json=payload, headers=headers, timeout=30)
-        data = resp.json()
+        response, data = self.safe_request("POST", STATISTICS_URL, json=payload, headers=headers)
+        
+        if response is None or not isinstance(data, dict):
+            return None
         
         records = data.get("result", {}).get("records", [])
         for record in records:
-            if record.get("username") == login:
+            if isinstance(record, dict) and record.get("username") == login:
                 return record.get("playerId")
         return None
     
     @with_retry
     def deposit_to_player(self, player_id: str, amount: float):
+        """إيداع رصيد للحساب"""
         payload = {
             "amount": amount,
             "comment": None,
@@ -382,17 +426,30 @@ class IchancyAPI:
             "Referer": REFERER
         }
         
-        resp = self.scraper.post(DEPOSIT_URL, json=payload, headers=headers, timeout=30)
-        data = resp.json()
+        response, data = self.safe_request("POST", DEPOSIT_URL, json=payload, headers=headers)
         
-        return {
-            "success": data.get("result", False),
-            "status": resp.status_code,
-            "data": data
-        }
+        if response is None:
+            return {"success": False, "error": "Network error"}
+        
+        if isinstance(data, dict) and data.get("result", False):
+            return {
+                "success": True,
+                "status": response.status_code,
+                "data": data
+            }
+        else:
+            error_msg = "فشل الإيداع"
+            if isinstance(data, dict):
+                notifications = data.get("notification", [])
+                if notifications and isinstance(notifications, list) and len(notifications) > 0:
+                    if isinstance(notifications[0], dict):
+                        error_msg = notifications[0].get("content", error_msg)
+            
+            return {"success": False, "error": error_msg, "data": data}
     
     @with_retry
     def withdraw_from_player(self, player_id: str, amount: float):
+        """سحب رصيد من الحساب"""
         payload = {
             "amount": -amount,
             "comment": None,
@@ -409,17 +466,30 @@ class IchancyAPI:
             "Referer": REFERER
         }
         
-        resp = self.scraper.post(WITHDRAW_URL, json=payload, headers=headers, timeout=30)
-        data = resp.json()
+        response, data = self.safe_request("POST", WITHDRAW_URL, json=payload, headers=headers)
         
-        return {
-            "success": data.get("result", False),
-            "status": resp.status_code,
-            "data": data
-        }
+        if response is None:
+            return {"success": False, "error": "Network error"}
+        
+        if isinstance(data, dict) and data.get("result", False):
+            return {
+                "success": True,
+                "status": response.status_code,
+                "data": data
+            }
+        else:
+            error_msg = "فشل السحب"
+            if isinstance(data, dict):
+                notifications = data.get("notification", [])
+                if notifications and isinstance(notifications, list) and len(notifications) > 0:
+                    if isinstance(notifications[0], dict):
+                        error_msg = notifications[0].get("content", error_msg)
+            
+            return {"success": False, "error": error_msg, "data": data}
     
     @with_retry
     def get_player_balance(self, player_id: str):
+        """جلب رصيد الحساب"""
         payload = {"playerId": str(player_id)}
         headers = {
             "Content-Type": "application/json",
@@ -428,20 +498,27 @@ class IchancyAPI:
             "Referer": REFERER
         }
         
-        resp = self.scraper.post(GET_BALANCE_URL, json=payload, headers=headers, timeout=30)
-        data = resp.json()
+        response, data = self.safe_request("POST", GET_BALANCE_URL, json=payload, headers=headers)
         
-        results = data.get("result", [])
-        balance = results[0].get("balance", 0) if isinstance(results, list) and results else 0
+        if response is None:
+            return {"success": False, "error": "Network error", "balance": 0}
         
-        return {
-            "success": True,
-            "balance": balance,
-            "status": resp.status_code,
-            "data": data
-        }
+        if isinstance(data, dict):
+            results = data.get("result", [])
+            if isinstance(results, list) and len(results) > 0:
+                if isinstance(results[0], dict):
+                    balance = results[0].get("balance", 0)
+                    return {
+                        "success": True,
+                        "balance": balance,
+                        "status": response.status_code,
+                        "data": data
+                    }
+        
+        return {"success": False, "error": "Failed to parse balance", "balance": 0}
     
     def check_email_exists(self, email: str):
+        """التحقق من وجود الإيميل"""
         payload = {"page": 1, "pageSize": 100, "filter": {"email": email}}
         headers = {
             "Content-Type": "application/json",
@@ -450,16 +527,19 @@ class IchancyAPI:
             "Referer": REFERER
         }
         
-        resp = self.scraper.post(STATISTICS_URL, json=payload, headers=headers, timeout=30)
-        data = resp.json()
+        response, data = self.safe_request("POST", STATISTICS_URL, json=payload, headers=headers)
+        
+        if response is None or not isinstance(data, dict):
+            return False
         
         records = data.get("result", {}).get("records", [])
         for record in records:
-            if record.get("email") == email:
+            if isinstance(record, dict) and record.get("email") == email:
                 return True
         return False
     
     def check_player_exists(self, login: str):
+        """التحقق من وجود اللاعب"""
         payload = {"page": 1, "pageSize": 100, "filter": {"login": login}}
         headers = {
             "Content-Type": "application/json",
@@ -468,23 +548,29 @@ class IchancyAPI:
             "Referer": REFERER
         }
         
-        resp = self.scraper.post(STATISTICS_URL, json=payload, headers=headers, timeout=30)
-        data = resp.json()
+        response, data = self.safe_request("POST", STATISTICS_URL, json=payload, headers=headers)
+        
+        if response is None or not isinstance(data, dict):
+            return False
         
         records = data.get("result", {}).get("records", [])
         for record in records:
-            if record.get("username") == login:
+            if isinstance(record, dict) and record.get("username") == login:
                 return True
         return False
 
 # ========== Telegram Bot ==========
+# المتغيرات العامة
+active_users = set()
+api = IchancyAPI()
+db = Database()
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """بدء البوت"""
     user_id = str(update.effective_user.id)
     username = update.effective_user.username
     
     # إضافة المستخدم إلى قاعدة البيانات
-    db = Database()
     db.add_user(user_id, username)
     
     # إنشاء لوحة المفاتيح
@@ -553,18 +639,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض رصيد المستخدم"""
     user_id = str(update.effective_user.id)
-    db = Database()
     balance = db.get_user_balance(user_id)
     
     await update.message.reply_text(
         f"💰 *رصيدك الحالي:* {balance} NSP",
         parse_mode='Markdown'
     )
-
-# المتغيرات العامة
-active_users = set()
-api = IchancyAPI()
-db = Database()
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالجة الأزرار"""
@@ -574,6 +654,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     
     if query.data == 'create_account':
+        # التحقق من تكوين API أولاً
+        if not all([AGENT_USERNAME, AGENT_PASSWORD, PARENT_ID]):
+            await query.edit_message_text(
+                "❌ خدمة إنشاء الحسابات غير متاحة حالياً\n"
+                "يرجى المحاولة لاحقاً أو الاتصال بالدعم."
+            )
+            return
+        
         existing = db.get_ichancy_account(user_id)
         if existing:
             await query.edit_message_text(
@@ -597,6 +685,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❗ لم تنشئ حساباً بعد!")
             return
         
+        if not all([AGENT_USERNAME, AGENT_PASSWORD, PARENT_ID]):
+            await query.edit_message_text("❌ خدمة الإيداع غير متاحة حالياً")
+            return
+        
         if chat_id in active_users:
             await query.edit_message_text("⏳ يرجى الانتظار قبل المحاولة مرة أخرى")
             return
@@ -615,6 +707,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         account = db.get_ichancy_account(user_id)
         if not account:
             await query.edit_message_text("❗ لم تنشئ حساباً بعد!")
+            return
+        
+        if not all([AGENT_USERNAME, AGENT_PASSWORD, PARENT_ID]):
+            await query.edit_message_text("❌ خدمة السحب غير متاحة حالياً")
             return
         
         if chat_id in active_users:
@@ -710,6 +806,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 base_login = f"{text}_TSA"
                 existing_logins = db.get_all_ichancy_logins()
                 
+                # التحقق من توفر الاسم
                 if base_login in existing_logins or api.check_player_exists(base_login):
                     counter = 1
                     new_login = f"{base_login}{counter}"
@@ -791,6 +888,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         
                         await withdraw_process(update, user_id, player_id, amount)
                     
+                    # تنظيف البيانات
                     if chat_id in active_users:
                         active_users.discard(chat_id)
                     context.user_data.clear()
@@ -805,11 +903,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in handle_message: {e}")
         await update.message.reply_text(f"❌ حدث خطأ: {str(e)}")
         
+        # تنظيف في حالة الخطأ
         if chat_id in active_users:
             active_users.discard(chat_id)
         context.user_data.clear()
 
 async def create_account_process(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
+    """عملية إنشاء الحساب"""
     user_id = str(update.effective_user.id)
     login = context.user_data['login']
     password = context.user_data['password']
@@ -819,14 +919,16 @@ async def create_account_process(update: Update, context: ContextTypes.DEFAULT_T
         
         result = api.create_player_with_credentials(login, password)
         
-        if not result['success']:
-            await update.message.reply_text(f"❌ فشل إنشاء الحساب: {result['error']}")
+        if not result.get('success', False):
+            error_msg = result.get('error', 'فشل غير معروف')
+            await update.message.reply_text(f"❌ فشل إنشاء الحساب: {error_msg}")
             return
         
-        player_id = result['player_id']
-        email = result['email']
+        player_id = result.get('player_id')
+        email = result.get('email', f"{login}@TSA.com")
         
-        db.add_ichancy_account(
+        # حفظ في قاعدة البيانات
+        success = db.add_ichancy_account(
             user_id=user_id,
             player_id=player_id,
             login=login,
@@ -835,21 +937,29 @@ async def create_account_process(update: Update, context: ContextTypes.DEFAULT_T
             initial_balance=amount
         )
         
+        if not success:
+            await update.message.reply_text("❌ فشل حفظ الحساب في قاعدة البيانات")
+            return
+        
+        # إذا كان هناك مبلغ ابتدائي
         if amount > 0:
             await update.message.reply_text(f"⏳ جاري شحن {amount} NSP...")
             deposit_result = api.deposit_to_player(player_id, amount)
             
-            if not deposit_result['success']:
-                error_msg = deposit_result['data'].get('notification', [{}])[0].get('content', 'فشل الشحن')
+            if not deposit_result.get('success', False):
+                error_msg = deposit_result.get('error', 'فشل الشحن')
                 await update.message.reply_text(
                     f"⚠️ تم إنشاء الحساب ولكن فشل الشحن:\n{error_msg}"
                 )
             else:
+                # خصم من رصيد المستخدم المحلي
                 db.update_user_balance(user_id, amount, "subtract")
         
+        # جلب الرصيد النهائي
         balance_result = api.get_player_balance(player_id)
-        final_balance = balance_result['balance'] if balance_result['success'] else amount
+        final_balance = balance_result.get('balance', amount) if balance_result.get('success', False) else amount
         
+        # رسالة النجاح
         success_message = f"""
 ✅ *تم إنشاء الحساب بنجاح!*
 
@@ -871,9 +981,11 @@ async def create_account_process(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"❌ حدث خطأ أثناء إنشاء الحساب: {str(e)}")
 
 async def deposit_process(update: Update, user_id: str, player_id: str, amount: float):
+    """عملية الإيداع"""
     try:
         await update.message.reply_text(f"⏳ جاري إيداع {amount} NSP...")
         
+        # التحقق من رصيد المستخدم المحلي
         user_balance = db.get_user_balance(user_id)
         if user_balance < amount:
             await update.message.reply_text(
@@ -882,13 +994,15 @@ async def deposit_process(update: Update, user_id: str, player_id: str, amount: 
             )
             return
         
+        # تنفيذ الإيداع عبر API
         result = api.deposit_to_player(player_id, amount)
         
-        if result['success']:
+        if result.get('success', False):
+            # خصم من رصيد المستخدم المحلي
             db.update_user_balance(user_id, amount, "subtract")
             await update.message.reply_text(f"✅ تم إيداع {amount} NSP بنجاح!")
         else:
-            error_msg = result['data'].get('notification', [{}])[0].get('content', 'فشل الإيداع')
+            error_msg = result.get('error', 'فشل الإيداع')
             await update.message.reply_text(f"❌ فشل الإيداع: {error_msg}")
             
     except Exception as e:
@@ -896,16 +1010,19 @@ async def deposit_process(update: Update, user_id: str, player_id: str, amount: 
         await update.message.reply_text(f"❌ حدث خطأ أثناء الإيداع: {str(e)}")
 
 async def withdraw_process(update: Update, user_id: str, player_id: str, amount: float):
+    """عملية السحب"""
     try:
         await update.message.reply_text(f"⏳ جاري سحب {amount} NSP...")
         
+        # تنفيذ السحب عبر API
         result = api.withdraw_from_player(player_id, amount)
         
-        if result['success']:
+        if result.get('success', False):
+            # إضافة إلى رصيد المستخدم المحلي
             db.update_user_balance(user_id, amount, "add")
             await update.message.reply_text(f"✅ تم سحب {amount} NSP بنجاح!")
         else:
-            error_msg = result['data'].get('notification', [{}])[0].get('content', 'فشل السحب')
+            error_msg = result.get('error', 'فشل السحب')
             await update.message.reply_text(f"❌ فشل السحب: {error_msg}")
             
     except Exception as e:
@@ -928,12 +1045,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """الدالة الرئيسية لتشغيل البوت"""
     logger.info("🚀 Starting Ichancy Bot...")
-    
-    # التحقق من المتغيرات البيئية
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN not found in environment variables!")
-        logger.error("Please set BOT_TOKEN environment variable")
-        exit(1)
+    logger.info(f"Bot Token: {'✓' if BOT_TOKEN else '✗'}")
+    logger.info(f"Agent Username: {'✓' if AGENT_USERNAME else '✗'}")
+    logger.info(f"Agent Password: {'✓' if AGENT_PASSWORD else '✗'}")
+    logger.info(f"Parent ID: {'✓' if PARENT_ID else '✗'}")
     
     # إنشاء تطبيق البوت
     application = Application.builder().token(BOT_TOKEN).build()
