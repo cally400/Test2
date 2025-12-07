@@ -985,7 +985,7 @@ class IchancyBot:
 # ========== التشغيل الرئيسي ==========
 def main():
     # أدخل توكن البوت هنا
-    TOKEN = "YOUR_BOT_TOKEN_HERE"  # استبدل هذا بتوكن البوت الخاص بك
+    TOKEN = "8102146925:AAE73uGcF7a4YZ_vrP1fXvXzUve3Wiu3MwQ"  # استبدل هذا بتوكن البوت الخاص بك
     
     # إذا كان التوكن في متغير بيئي
     if "BOT_TOKEN" in os.environ:
