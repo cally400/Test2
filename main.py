@@ -7,7 +7,6 @@ import string
 import re
 import cloudscraper
 from datetime import datetime
-from typing import Dict, Optional, List
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -15,11 +14,10 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters
+    filters,
+    ConversationHandler
 )
 import sqlite3
-import json
-from threading import Lock
 
 # ========== تهيئة الإعدادات ==========
 logging.basicConfig(
@@ -48,178 +46,177 @@ USER_AGENT = (
 )
 REFERER = ORIGIN + "/dashboard"
 
+# ========== حالات المحادثة ==========
+USERNAME, PASSWORD, INITIAL_AMOUNT = range(3)
+
 # ========== قاعدة البيانات ==========
 class Database:
     def __init__(self, db_path="ichancy_bot.db"):
         self.db_path = db_path
-        self.lock = Lock()
         self.init_db()
     
+    def get_connection(self):
+        return sqlite3.connect(self.db_path)
+    
     def init_db(self):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # جدول المستخدمين
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    username TEXT,
-                    balance REAL DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # جدول حسابات ichancy
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS ichancy_accounts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT,
-                    player_id TEXT,
-                    login TEXT UNIQUE,
-                    password TEXT,
-                    email TEXT,
-                    initial_balance REAL DEFAULT 0,
-                    created_at TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id)
-                )
-            ''')
-            
-            # جدول المعاملات
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS transactions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT,
-                    player_id TEXT,
-                    type TEXT,
-                    amount REAL,
-                    status TEXT,
-                    details TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            conn.commit()
-            conn.close()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # جدول المستخدمين
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                balance REAL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # جدول حسابات ichancy
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ichancy_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                player_id TEXT,
+                login TEXT UNIQUE,
+                password TEXT,
+                email TEXT,
+                initial_balance REAL DEFAULT 0,
+                created_at TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        # جدول المعاملات
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                player_id TEXT,
+                type TEXT,
+                amount REAL,
+                status TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
     
     def add_user(self, user_id: str, username: str = None):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    "INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
-                    (user_id, username)
-                )
-                conn.commit()
-                return True
-            except Exception as e:
-                logger.error(f"Error adding user: {e}")
-                return False
-            finally:
-                conn.close()
-    
-    def get_user_balance(self, user_id: str):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-            result = cursor.fetchone()
-            conn.close()
-            return result[0] if result else 0
-    
-    def update_user_balance(self, user_id: str, amount: float, operation: str = "add"):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-            result = cursor.fetchone()
-            if not result:
-                return False
-            
-            current_balance = result[0]
-            if operation == "add":
-                new_balance = current_balance + amount
-            elif operation == "subtract":
-                if current_balance < amount:
-                    return False
-                new_balance = current_balance - amount
-            else:
-                new_balance = amount
-            
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
             cursor.execute(
-                "UPDATE users SET balance = ? WHERE user_id = ?",
-                (new_balance, user_id)
+                "INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
+                (user_id, username)
             )
             conn.commit()
-            conn.close()
             return True
+        except Exception as e:
+            logger.error(f"Error adding user: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_user_balance(self, user_id: str):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 0
+    
+    def update_user_balance(self, user_id: str, amount: float, operation: str = "add"):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        if not result:
+            conn.close()
+            return False
+        
+        current_balance = result[0]
+        if operation == "add":
+            new_balance = current_balance + amount
+        elif operation == "subtract":
+            if current_balance < amount:
+                conn.close()
+                return False
+            new_balance = current_balance - amount
+        else:
+            new_balance = amount
+        
+        cursor.execute(
+            "UPDATE users SET balance = ? WHERE user_id = ?",
+            (new_balance, user_id)
+        )
+        conn.commit()
+        conn.close()
+        return True
     
     def add_ichancy_account(self, user_id: str, player_id: str, login: str, 
                           password: str, email: str, initial_balance: float = 0):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            try:
-                cursor.execute('''
-                    INSERT INTO ichancy_accounts 
-                    (user_id, player_id, login, password, email, initial_balance, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (user_id, player_id, login, password, email, initial_balance, datetime.now()))
-                conn.commit()
-                return True
-            except Exception as e:
-                logger.error(f"Error adding ichancy account: {e}")
-                return False
-            finally:
-                conn.close()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO ichancy_accounts 
+                (user_id, player_id, login, password, email, initial_balance, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, player_id, login, password, email, initial_balance, datetime.now()))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding ichancy account: {e}")
+            return False
+        finally:
+            conn.close()
     
     def get_ichancy_account(self, user_id: str):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM ichancy_accounts WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
-                (user_id,)
-            )
-            result = cursor.fetchone()
-            conn.close()
-            
-            if result:
-                return {
-                    "id": result[0],
-                    "user_id": result[1],
-                    "player_id": result[2],
-                    "login": result[3],
-                    "password": result[4],
-                    "email": result[5],
-                    "initial_balance": result[6],
-                    "created_at": result[7]
-                }
-            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM ichancy_accounts WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+            (user_id,)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return {
+                "id": result[0],
+                "user_id": result[1],
+                "player_id": result[2],
+                "login": result[3],
+                "password": result[4],
+                "email": result[5],
+                "initial_balance": result[6],
+                "created_at": result[7]
+            }
+        return None
     
-    def get_all_ichancy_accounts(self):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT login FROM ichancy_accounts WHERE login IS NOT NULL")
-            results = cursor.fetchall()
-            conn.close()
-            return [r[0] for r in results]
+    def get_all_ichancy_logins(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT login FROM ichancy_accounts WHERE login IS NOT NULL")
+        results = cursor.fetchall()
+        conn.close()
+        return [r[0] for r in results] if results else []
     
     def add_transaction(self, user_id: str, player_id: str, 
                        trans_type: str, amount: float, status: str, details: str = ""):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO transactions 
-                (user_id, player_id, type, amount, status, details)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (user_id, player_id, trans_type, amount, status, details))
-            conn.commit()
-            conn.close()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO transactions 
+            (user_id, player_id, type, amount, status, details)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, player_id, trans_type, amount, status, details))
+        conn.commit()
+        conn.close()
 
 # ========== Ichancy API Manager ==========
 class IchancyAPI:
@@ -228,7 +225,6 @@ class IchancyAPI:
         self.cookie_file = "ichancy_cookies.pkl"
         self.is_logged_in = False
         self.load_cookies()
-        self.db = Database()
     
     def load_cookies(self):
         if os.path.exists(self.cookie_file):
@@ -274,26 +270,25 @@ class IchancyAPI:
                 raise Exception(f"فشل تسجيل الدخول: {data}")
     
     def with_retry(func):
-        async def wrapper(self, *args, **kwargs):
+        def wrapper(self, *args, **kwargs):
             try:
                 self.ensure_login()
-                return await func(self, *args, **kwargs)
+                return func(self, *args, **kwargs)
             except Exception as e:
                 logger.error(f"API error in {func.__name__}: {e}")
-                # حاول إعادة تسجيل الدخول
                 self.is_logged_in = False
                 self.ensure_login()
-                return await func(self, *args, **kwargs)
+                return func(self, *args, **kwargs)
         return wrapper
     
     @with_retry
-    async def create_player_with_credentials(self, login: str, password: str):
+    def create_player_with_credentials(self, login: str, password: str):
         """إنشاء حساب جديد"""
         email = f"{login}@TSA.com"
         
         # تحقق من تفرد الإيميل
         counter = 1
-        while await self.check_email_exists(email):
+        while self.check_email_exists(email):
             email = f"{login}_{counter}@TSA.com"
             counter += 1
         
@@ -317,7 +312,7 @@ class IchancyAPI:
         data = resp.json()
         
         if data.get("result", False):
-            player_id = await self.get_player_id_by_login(login)
+            player_id = self.get_player_id_by_login(login)
             return {
                 "success": True,
                 "player_id": player_id,
@@ -332,7 +327,7 @@ class IchancyAPI:
                 "error": data.get("notification", [{}])[0].get("content", "فشل إنشاء الحساب")
             }
     
-    async def get_player_id_by_login(self, login: str):
+    def get_player_id_by_login(self, login: str):
         payload = {"page": 1, "pageSize": 100, "filter": {"login": login}}
         headers = {
             "Content-Type": "application/json",
@@ -351,7 +346,7 @@ class IchancyAPI:
         return None
     
     @with_retry
-    async def deposit_to_player(self, player_id: str, amount: float):
+    def deposit_to_player(self, player_id: str, amount: float):
         """إيداع رصيد للحساب"""
         payload = {
             "amount": amount,
@@ -379,10 +374,10 @@ class IchancyAPI:
         }
     
     @with_retry
-    async def withdraw_from_player(self, player_id: str, amount: float):
+    def withdraw_from_player(self, player_id: str, amount: float):
         """سحب رصيد من الحساب"""
         payload = {
-            "amount": -amount,  # سالب للسحب
+            "amount": -amount,
             "comment": None,
             "playerId": player_id,
             "currencyCode": "NSP",
@@ -407,7 +402,7 @@ class IchancyAPI:
         }
     
     @with_retry
-    async def get_player_balance(self, player_id: str):
+    def get_player_balance(self, player_id: str):
         """جلب رصيد الحساب"""
         payload = {"playerId": str(player_id)}
         headers = {
@@ -430,7 +425,7 @@ class IchancyAPI:
             "data": data
         }
     
-    async def check_email_exists(self, email: str):
+    def check_email_exists(self, email: str):
         payload = {"page": 1, "pageSize": 100, "filter": {"email": email}}
         headers = {
             "Content-Type": "application/json",
@@ -448,7 +443,7 @@ class IchancyAPI:
                 return True
         return False
     
-    async def check_player_exists(self, login: str):
+    def check_player_exists(self, login: str):
         payload = {"page": 1, "pageSize": 100, "filter": {"login": login}}
         headers = {
             "Content-Type": "application/json",
@@ -466,7 +461,7 @@ class IchancyAPI:
                 return True
         return False
 
-# ========== Telegram Bot Handler ==========
+# ========== Telegram Bot ==========
 class IchancyBot:
     def __init__(self, token: str):
         self.token = token
@@ -481,7 +476,7 @@ class IchancyBot:
         self.setup_handlers()
     
     def setup_handlers(self):
-        # أوامر البوت
+        # تعريف أوامر البوت
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("balance", self.balance_command))
@@ -510,7 +505,8 @@ class IchancyBot:
             [InlineKeyboardButton("💳 سحب الرصيد", callback_data='withdraw')],
             [InlineKeyboardButton("👤 حسابي", callback_data='my_account')],
             [InlineKeyboardButton("📊 رصيدي", callback_data='my_balance')],
-            [InlineKeyboardButton("🌐 رابط الموقع", callback_data='site_url')]
+            [InlineKeyboardButton("🌐 رابط الموقع", callback_data='site_url')],
+            [InlineKeyboardButton("🆘 المساعدة", callback_data='help')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -518,11 +514,11 @@ class IchancyBot:
         🤖 *مرحباً بك في بوت إدارة حسابات Ichancy*
 
         *الخدمات المتاحة:*
-        • إنشاء حساب جديد على Ichancy
-        • تعبئة الرصيد للحساب
-        • سحب الرصيد من الحساب
-        • عرض معلومات حسابك
-        • معرفة رصيدك في الموقع
+        • 🆕 إنشاء حساب جديد على Ichancy
+        • 💰 تعبئة الرصيد للحساب
+        • 💳 سحب الرصيد من الحساب
+        • 👤 عرض معلومات حسابك
+        • 📊 معرفة رصيدك في الموقع
 
         اختر الخدمة المطلوبة من الأزرار أدناه 👇
         """
@@ -551,6 +547,11 @@ class IchancyBot:
         *سحب الرصيد:*
         - اضغط على "سحب الرصيد"
         - أدخل المبلغ المطلوب (10+ NSP)
+
+        *الأوامر المتاحة:*
+        /start - بدء البوت
+        /help - عرض التعليمات
+        /balance - عرض رصيدك
 
         *ملاحظات:*
         - الحد الأدنى لأي عملية هو 10 NSP
@@ -591,8 +592,7 @@ class IchancyBot:
             
             await query.edit_message_text(
                 "أدخل اسم المستخدم الذي تريده (باستخدام الأحرف اللاتينية فقط):\n"
-                "مثال: `john_doe`",
-                parse_mode='Markdown'
+                "مثال: `john_doe`"
             )
             context.user_data['awaiting'] = 'username'
             context.user_data['step'] = 'create_account'
@@ -630,7 +630,7 @@ class IchancyBot:
             self.active_users.add(chat_id)
             
             # جلب الرصيد أولاً
-            result = await self.api.get_player_balance(account['player_id'])
+            result = self.api.get_player_balance(account['player_id'])
             if not result['success']:
                 await query.edit_message_text("❌ تعذر جلب الرصيد من الموقع")
                 self.active_users.discard(chat_id)
@@ -655,18 +655,18 @@ class IchancyBot:
                 return
             
             # جلب الرصيد الحالي
-            result = await self.api.get_player_balance(account['player_id'])
+            result = self.api.get_player_balance(account['player_id'])
             balance = result['balance'] if result['success'] else "غير متاح"
             
             message = f"""
-            📋 *معلومات حسابك:*
+📋 *معلومات حسابك:*
 
-            👤 *اسم الدخول:* `{account['login']}`
-            📧 *الإيميل:* `{account['email']}`
-            🔑 *كلمة المرور:* `{account['password']}`
-            🆔 *رقم اللاعب:* `{account['player_id']}`
-            📅 *تاريخ الإنشاء:* `{account['created_at']}`
-            💰 *الرصيد الحالي:* `{balance}` NSP
+👤 *اسم الدخول:* `{account['login']}`
+📧 *الإيميل:* `{account['email']}`
+🔑 *كلمة المرور:* `{account['password']}`
+🆔 *رقم اللاعب:* `{account['player_id']}`
+📅 *تاريخ الإنشاء:* `{account['created_at']}`
+💰 *الرصيد الحالي:* `{balance}` NSP
             """
             
             await query.edit_message_text(message, parse_mode='Markdown')
@@ -686,6 +686,9 @@ class IchancyBot:
                 "https://agents.ichancy.com",
                 parse_mode='Markdown'
             )
+        
+        elif query.data == 'help':
+            await self.help_command(update, context)
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """معالجة الرسائل النصية"""
@@ -716,12 +719,12 @@ class IchancyBot:
                     base_login = f"{text}_TSA"
                     
                     # التحقق من تفرد الاسم
-                    existing_logins = self.db.get_all_ichancy_accounts()
-                    if base_login in existing_logins or await self.api.check_player_exists(base_login):
+                    existing_logins = self.db.get_all_ichancy_logins()
+                    if base_login in existing_logins or self.api.check_player_exists(base_login):
                         # محاولة أسماء بديلة
                         counter = 1
                         new_login = f"{base_login}{counter}"
-                        while new_login in existing_logins or await self.api.check_player_exists(new_login):
+                        while new_login in existing_logins or self.api.check_player_exists(new_login):
                             counter += 1
                             new_login = f"{base_login}{counter}"
                             if counter > 10:
@@ -766,10 +769,8 @@ class IchancyBot:
                             )
                             return
                         
-                        context.user_data['initial_amount'] = amount
-                        
                         # بدء عملية الإنشاء
-                        await self.create_account_process(update, context)
+                        await self.create_account_process(update, context, amount)
                         
                     except ValueError:
                         await update.message.reply_text(
@@ -791,7 +792,7 @@ class IchancyBot:
                         player_id = context.user_data['player_id']
                         
                         if step == 'deposit':
-                            await self.deposit_process(update, player_id, amount)
+                            await self.deposit_process(update, user_id, player_id, amount)
                         else:
                             # التحقق من الرصيد المتاح للسحب
                             available = context.user_data.get('available_balance', 0)
@@ -803,7 +804,7 @@ class IchancyBot:
                                 )
                                 return
                             
-                            await self.withdraw_process(update, player_id, amount)
+                            await self.withdraw_process(update, user_id, player_id, amount)
                         
                         # تنظيف البيانات
                         if chat_id in self.active_users:
@@ -825,20 +826,19 @@ class IchancyBot:
                 self.active_users.discard(chat_id)
             context.user_data.clear()
     
-    async def create_account_process(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def create_account_process(self, update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
         """عملية إنشاء الحساب"""
         user_id = str(update.effective_user.id)
         chat_id = update.message.chat.id
         
         login = context.user_data['login']
         password = context.user_data['password']
-        initial_amount = context.user_data['initial_amount']
         
         try:
             await update.message.reply_text("⏳ جاري إنشاء الحساب...")
             
             # إنشاء الحساب عبر API
-            result = await self.api.create_player_with_credentials(login, password)
+            result = self.api.create_player_with_credentials(login, password)
             
             if not result['success']:
                 await update.message.reply_text(f"❌ فشل إنشاء الحساب: {result['error']}")
@@ -854,13 +854,13 @@ class IchancyBot:
                 login=login,
                 password=password,
                 email=email,
-                initial_balance=initial_amount
+                initial_balance=amount
             )
             
             # إذا كان هناك مبلغ ابتدائي
-            if initial_amount > 0:
-                await update.message.reply_text(f"⏳ جاري شحن {initial_amount} NSP...")
-                deposit_result = await self.api.deposit_to_player(player_id, initial_amount)
+            if amount > 0:
+                await update.message.reply_text(f"⏳ جاري شحن {amount} NSP...")
+                deposit_result = self.api.deposit_to_player(player_id, amount)
                 
                 if not deposit_result['success']:
                     # الحساب أنشئ ولكن الشحن فشل
@@ -870,28 +870,28 @@ class IchancyBot:
                     )
                 else:
                     # خصم من رصيد المستخدم
-                    self.db.update_user_balance(user_id, initial_amount, "subtract")
+                    self.db.update_user_balance(user_id, amount, "subtract")
                     self.db.add_transaction(
-                        user_id, player_id, "deposit", initial_amount, 
+                        user_id, player_id, "deposit", amount, 
                         "success", "شحن ابتدائي عند الإنشاء"
                     )
             
             # جلب الرصيد النهائي
-            balance_result = await self.api.get_player_balance(player_id)
-            final_balance = balance_result['balance'] if balance_result['success'] else initial_amount
+            balance_result = self.api.get_player_balance(player_id)
+            final_balance = balance_result['balance'] if balance_result['success'] else amount
             
             # رسالة النجاح
             success_message = f"""
-            ✅ *تم إنشاء الحساب بنجاح!*
+✅ *تم إنشاء الحساب بنجاح!*
 
-            👤 *اسم المستخدم:* `{login}`
-            📧 *الإيميل:* `{email}`
-            🔑 *كلمة المرور:* `{password}`
-            🆔 *رقم اللاعب:* `{player_id}`
-            💰 *الرصيد الابتدائي:* {initial_amount} NSP
-            📊 *الرصيد الحالي:* {final_balance} NSP
+👤 *اسم المستخدم:* `{login}`
+📧 *الإيميل:* `{email}`
+🔑 *كلمة المرور:* `{password}`
+🆔 *رقم اللاعب:* `{player_id}`
+💰 *الرصيد الابتدائي:* {amount} NSP
+📊 *الرصيد الحالي:* {final_balance} NSP
 
-            ⚠️ *احفظ هذه البيانات في مكان آمن!*
+⚠️ *احفظ هذه البيانات في مكان آمن!*
             """
             
             await update.message.reply_text(success_message, parse_mode='Markdown')
@@ -903,10 +903,8 @@ class IchancyBot:
             logger.error(f"Error in create_account_process: {e}")
             await update.message.reply_text(f"❌ حدث خطأ أثناء إنشاء الحساب: {str(e)}")
     
-    async def deposit_process(self, update: Update, player_id: str, amount: float):
+    async def deposit_process(self, update: Update, user_id: str, player_id: str, amount: float):
         """عملية الإيداع"""
-        user_id = str(update.effective_user.id)
-        
         try:
             await update.message.reply_text(f"⏳ جاري إيداع {amount} NSP...")
             
@@ -920,7 +918,7 @@ class IchancyBot:
                 return
             
             # تنفيذ الإيداع عبر API
-            result = await self.api.deposit_to_player(player_id, amount)
+            result = self.api.deposit_to_player(player_id, amount)
             
             if result['success']:
                 # خصم من رصيد المستخدم
@@ -938,15 +936,13 @@ class IchancyBot:
             logger.error(f"Error in deposit_process: {e}")
             await update.message.reply_text(f"❌ حدث خطأ أثناء الإيداع: {str(e)}")
     
-    async def withdraw_process(self, update: Update, player_id: str, amount: float):
+    async def withdraw_process(self, update: Update, user_id: str, player_id: str, amount: float):
         """عملية السحب"""
-        user_id = str(update.effective_user.id)
-        
         try:
             await update.message.reply_text(f"⏳ جاري سحب {amount} NSP...")
             
             # تنفيذ السحب عبر API
-            result = await self.api.withdraw_from_player(player_id, amount)
+            result = self.api.withdraw_from_player(player_id, amount)
             
             if result['success']:
                 # إضافة إلى رصيد المستخدم
@@ -993,9 +989,15 @@ def main():
     
     if TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ الرجاء إدخال توكن البوت!")
+        print("\nخطوات الحصول على التوكن:")
         print("1. افتح @BotFather في تليجرام")
-        print("2. أنشئ بوت جديد")
-        print("3. انسخ التوكن وأدخله في المتغير TOKEN")
+        print("2. أرسل /newbot")
+        print("3. اتبع التعليمات لإنشاء بوت جديد")
+        print("4. انسخ التوكن (سيبدو هكذا: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz)")
+        print("\nيمكنك تعيين التوكن بعدة طرق:")
+        print("1. تعديل المتغير TOKEN في الكود مباشرة")
+        print("2. استخدام متغير بيئي: export BOT_TOKEN='your_token_here'")
+        print("3. استخدام ملف .env: BOT_TOKEN=your_token_here")
         return
     
     try:
