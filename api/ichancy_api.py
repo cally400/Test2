@@ -688,6 +688,8 @@ class DatabaseManager:
 
 # إنشاء نسخة وحيدة من مدير قاعدة البيانات
 db = DatabaseManager()
+# إنشاء نسخة وحيدة من API
+api = IchancyAPI()
 
 if __name__ == "__main__":
     # اختبار الاتصال بقاعدة البيانات
