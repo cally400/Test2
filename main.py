@@ -8,7 +8,6 @@ import sys
 import logging
 import signal
 import asyncio
-from threading import Thread
 from datetime import datetime
 
 # إضافة المسار الحالي للمسارات
@@ -26,7 +25,7 @@ from telegram import Update
 
 # استيراد المكونات الخاصة بالتطبيق
 from config import config
-from utils.logger import setup_logger  # تم التغيير هنا
+from utils.logger import setup_logger
 from handlers import (
     start_handler,
     account_handler,
@@ -38,7 +37,7 @@ from database import db
 from api.ichancy_api import api
 
 # إعداد التسجيل
-logger = setup_logger('ichancy_bot')  # تم التغيير هنا
+logger = setup_logger('ichancy_bot')
 
 class IchancyBot:
     """فئة رئيسية لإدارة بوت Ichancy"""
@@ -204,12 +203,12 @@ class IchancyBot:
             # إعداد المعالجات
             self.setup_handlers()
             
-            # بدء Polling
+            # بدء Polling باستخدام run_polling مباشرة
             await self.application.run_polling(
-                allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
                 timeout=30,
-                poll_interval=0.5
+                poll_interval=1.0,
+                close_loop=False  # مهم: لا تغلق event loop
             )
             
         except Exception as e:
@@ -217,18 +216,25 @@ class IchancyBot:
             self.is_running = False
             raise
     
-    async def cleanup(self):
-        """تنظيف الموارد قبل الإغلاق"""
+    async def stop_bot(self):
+        """إيقاف البوت بشكل صحيح"""
         
         try:
-            logger.info("🧹 جاري تنظيف الموارد...")
+            logger.info("🛑 جاري إيقاف البوت...")
             
             self.is_running = False
             
-            logger.info("✅ تم التنظيف بنجاح")
+            if self.application:
+                if self.application.updater and self.application.updater.running:
+                    await self.application.updater.stop()
+                if self.application.running:
+                    await self.application.stop()
+                await self.application.shutdown()
+            
+            logger.info("✅ تم إيقاف البوت بنجاح")
             
         except Exception as e:
-            logger.error(f"❌ حدث خطأ أثناء التنظيف: {str(e)}")
+            logger.error(f"❌ حدث خطأ أثناء إيقاف البوت: {str(e)}")
 
 async def run_bot():
     """تشغيل البوت"""
@@ -241,25 +247,29 @@ async def run_bot():
             logger.error("❌ فشل تهيئة البوت، جاري الإغلاق...")
             return
         
-        # تشغيل في وضع Polling (للتجربة)
+        # تشغيل في وضع Polling
         logger.info("🛠️ جاري التشغيل في وضع Polling")
         await bot.start_polling()
             
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البوت بواسطة المستخدم")
-        
     except Exception as e:
         logger.error(f"❌ خطأ غير متوقع: {str(e)}")
-        
     finally:
-        # تنظيف الموارد
-        await bot.cleanup()
+        # إيقاف البوت بشكل صحيح
+        await bot.stop_bot()
 
 def signal_handler(signum, frame):
     """معالجة إشارات النظام"""
     
     logger.info(f"📡 استلام إشارة النظام: {signum}")
-    sys.exit(0)
+    
+    # إرسال KeyboardInterrupt ليكون كأن المستخدم ضغط Ctrl+C
+    import threading
+    threading.current_thread()._target = None
+    
+    # الخروج من البرنامج
+    os._exit(0)
 
 def main():
     """الدالة الرئيسية للتشغيل"""
@@ -273,11 +283,17 @@ def main():
         logger.info("🚀 بدء تشغيل بوت Ichancy")
         logger.info(f"📅 وقت البدء: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"🌐 البيئة: {config.RAILWAY_ENVIRONMENT}")
+        logger.info(f"⚙️ الوضع: {'إنتاج ⚡' if config.IS_PRODUCTION else 'تطوير 🛠️'}")
         logger.info("=" * 60)
         
-        # تشغيل البوت
+        # تشغيل البوت - استخدام asyncio.run بشكل صحيح
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
         asyncio.run(run_bot())
         
+    except KeyboardInterrupt:
+        logger.info("🛑 تم إيقاف البرنامج بواسطة المستخدم")
     except Exception as e:
         logger.error(f"❌ خطأ غير متوقع في الدالة الرئيسية: {str(e)}")
         sys.exit(1)
