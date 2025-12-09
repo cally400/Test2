@@ -1,302 +1,198 @@
 # main.py
 """
-الملف الرئيسي لتشغيل بوت Ichancy على Railway
+الملف الرئيسي لتشغيل بوت Ichancy على Railway - نسخة مستقرة
 """
 
 import os
 import sys
 import logging
-import signal
 import asyncio
 from datetime import datetime
 
 # إضافة المسار الحالي للمسارات
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from telegram.ext import (
-    Application, 
-    ApplicationBuilder, 
-    CommandHandler, 
-    MessageHandler, 
-    CallbackQueryHandler, 
-    filters
-)
-from telegram import Update
-
-# استيراد المكونات الخاصة بالتطبيق
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from config import config
 from utils.logger import setup_logger
-from handlers import (
-    start_handler,
-    account_handler,
-    deposit_handler,
-    withdraw_handler,
-    callback_handler
-)
-from database import db
-from api.ichancy_api import api
 
 # إعداد التسجيل
 logger = setup_logger('ichancy_bot')
 
-class IchancyBot:
-    """فئة رئيسية لإدارة بوت Ichancy"""
-    
-    def __init__(self):
-        self.application = None
-        self.is_running = False
-        self.start_time = None
-        
-    async def init_bot(self):
-        """تهيئة البوت"""
-        
-        try:
-            logger.info("🔧 جاري تهيئة بوت Ichancy...")
-            
-            # التحقق من إعدادات التطبيق
-            validation = config.validate()
-            logger.info(f"📋 نتائج التحقق: {validation}")
-            
-            # التحقق من إعدادات API
-            if not all([config.BOT_TOKEN, config.AGENT_USERNAME, config.AGENT_PASSWORD]):
-                logger.error("❌ إعدادات التطبيق غير مكتملة!")
-                return False
-            
-            # إنشاء تطبيق التليجرام
-            self.application = ApplicationBuilder().token(config.BOT_TOKEN).build()
-            
-            # تسجيل وقت البدء
-            self.start_time = datetime.now()
-            
-            logger.info("✅ تم تهيئة البوت بنجاح")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ فشل تهيئة البوت: {str(e)}")
-            return False
-    
-    def setup_handlers(self):
-        """إعداد المعالجات والأوامر"""
-        
-        try:
-            logger.info("🔧 جاري إعداد المعالجات...")
-            
-            # معالجة أمر /start
-            self.application.add_handler(CommandHandler("start", start_handler.start_handler))
-            
-            # إضافة الأوامر الأخرى إذا كانت موجودة في الملف
-            try:
-                self.application.add_handler(CommandHandler("help", start_handler.help_handler))
-                self.application.add_handler(CommandHandler("balance", start_handler.balance_handler))
-                self.application.add_handler(CommandHandler("stats", start_handler.stats_handler))
-            except AttributeError as e:
-                logger.warning(f"⚠️ بعض المعالجات غير متوفرة: {e}")
-            
-            # معالجة إنشاء الحساب
-            self.application.add_handler(CommandHandler("create_account", account_handler.create_account_handler))
-            
-            # معالجة تعبئة الرصيد
-            self.application.add_handler(CommandHandler("deposit", deposit_handler.deposit_handler))
-            
-            # معالجة سحب الرصيد
-            self.application.add_handler(CommandHandler("withdraw", withdraw_handler.withdraw_handler))
-            
-            # معالجة إدخال النصوص
-            self.application.add_handler(MessageHandler(
-                filters.TEXT & ~filters.COMMAND, 
-                self.handle_text_input
-            ))
-            
-            # معالجة الأزرار (Callback Queries)
-            self.application.add_handler(CallbackQueryHandler(callback_handler.handle_callback))
-            
-            logger.info("✅ تم إعداد المعالجات بنجاح")
-            
-        except Exception as e:
-            logger.error(f"❌ فشل إعداد المعالجات: {str(e)}")
-            raise
-    
-    async def handle_text_input(self, update: Update, context):
-        """معالجة إدخال النصوص"""
-        
-        user_id = str(update.effective_user.id)
-        text = update.message.text.strip()
-        
-        try:
-            logger.info(f"📝 إدخال نص من المستخدم {user_id}: {text[:50]}...")
-            
-            # التحقق من حالة إنشاء الحساب
-            from handlers.account_handler import user_states
-            if user_id in user_states:
-                state = user_states[user_id]
-                
-                if state.step == 'username':
-                    await account_handler.handle_username_input(update, context)
-                elif state.step == 'password':
-                    await account_handler.handle_password_input(update, context)
-                elif state.step == 'amount':
-                    await account_handler.handle_amount_input(update, context)
-                else:
-                    await update.message.reply_text(
-                        "❌ حالة غير معروفة، يرجى البدء من جديد باستخدام /start",
-                        parse_mode='Markdown'
-                    )
-                return
-            
-            # التحقق من حالة الإيداع
-            from handlers.deposit_handler import deposit_states
-            if user_id in deposit_states:
-                state = deposit_states[user_id]
-                
-                if state.step == 'amount':
-                    await deposit_handler.handle_deposit_amount(update, context)
-                else:
-                    await update.message.reply_text(
-                        "❌ حالة غير معروفة، يرجى البدء من جديد",
-                        parse_mode='Markdown'
-                    )
-                return
-            
-            # التحقق من حالة السحب
-            from handlers.withdraw_handler import withdraw_states
-            if user_id in withdraw_states:
-                state = withdraw_states[user_id]
-                
-                if state.step == 'amount':
-                    await withdraw_handler.handle_withdraw_amount(update, context)
-                else:
-                    await update.message.reply_text(
-                        "❌ حالة غير معروفة، يرجى البدء من جديد",
-                        parse_mode='Markdown'
-                    )
-                return
-            
-            # إذا لم يكن هناك حالة نشطة، عرض رسالة مساعدة
-            await update.message.reply_text(
-                "🤖 *مرحباً بك في بوت Ichancy*\n\n"
-                "💡 *الأوامر المتاحة:*\n"
-                "/start - عرض القائمة الرئيسية\n"
-                "/help - عرض دليل الاستخدام\n"
-                "/create_account - إنشاء حساب جديد\n"
-                "/deposit - تعبئة الرصيد\n"
-                "/withdraw - سحب الرصيد\n\n"
-                "📞 للدعم: @TSA_Support",
-                parse_mode='Markdown'
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ فشل معالجة الإدخال النصي للمستخدم {user_id}: {str(e)}")
-            
-            await update.message.reply_text(
-                "❌ حدث خطأ في معالجة طلبك. يرجى المحاولة مرة أخرى.",
-                parse_mode='Markdown'
-            )
-    
-    async def start_polling(self):
-        """بدء البوت في وضع Polling"""
-        
-        try:
-            logger.info("🚀 بدء البوت في وضع Polling...")
-            
-            self.is_running = True
-            
-            # إعداد المعالجات
-            self.setup_handlers()
-            
-            # بدء Polling باستخدام run_polling مباشرة
-            await self.application.run_polling(
-                drop_pending_updates=True,
-                timeout=30,
-                poll_interval=1.0,
-                close_loop=False  # مهم: لا تغلق event loop
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ توقف البوت عن العمل: {str(e)}")
-            self.is_running = False
-            raise
-    
-    async def stop_bot(self):
-        """إيقاف البوت بشكل صحيح"""
-        
-        try:
-            logger.info("🛑 جاري إيقاف البوت...")
-            
-            self.is_running = False
-            
-            if self.application:
-                if self.application.updater and self.application.updater.running:
-                    await self.application.updater.stop()
-                if self.application.running:
-                    await self.application.stop()
-                await self.application.shutdown()
-            
-            logger.info("✅ تم إيقاف البوت بنجاح")
-            
-        except Exception as e:
-            logger.error(f"❌ حدث خطأ أثناء إيقاف البوت: {str(e)}")
-
-async def run_bot():
-    """تشغيل البوت"""
-    
-    bot = IchancyBot()
+async def main():
+    """الدالة الرئيسية التشغيلية"""
     
     try:
-        # تهيئة البوت
-        if not await bot.init_bot():
-            logger.error("❌ فشل تهيئة البوت، جاري الإغلاق...")
-            return
-        
-        # تشغيل في وضع Polling
-        logger.info("🛠️ جاري التشغيل في وضع Polling")
-        await bot.start_polling()
-            
-    except KeyboardInterrupt:
-        logger.info("🛑 تم إيقاف البوت بواسطة المستخدم")
-    except Exception as e:
-        logger.error(f"❌ خطأ غير متوقع: {str(e)}")
-    finally:
-        # إيقاف البوت بشكل صحيح
-        await bot.stop_bot()
-
-def signal_handler(signum, frame):
-    """معالجة إشارات النظام"""
-    
-    logger.info(f"📡 استلام إشارة النظام: {signum}")
-    
-    # إرسال KeyboardInterrupt ليكون كأن المستخدم ضغط Ctrl+C
-    import threading
-    threading.current_thread()._target = None
-    
-    # الخروج من البرنامج
-    os._exit(0)
-
-def main():
-    """الدالة الرئيسية للتشغيل"""
-    
-    try:
-        # إعداد معالجات الإشارات
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-        
         logger.info("=" * 60)
         logger.info("🚀 بدء تشغيل بوت Ichancy")
         logger.info(f"📅 وقت البدء: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"🌐 البيئة: {config.RAILWAY_ENVIRONMENT}")
-        logger.info(f"⚙️ الوضع: {'إنتاج ⚡' if config.IS_PRODUCTION else 'تطوير 🛠️'}")
         logger.info("=" * 60)
         
-        # تشغيل البوت - استخدام asyncio.run بشكل صحيح
+        # التحقق من إعدادات التطبيق
+        if not all([config.BOT_TOKEN, config.AGENT_USERNAME, config.AGENT_PASSWORD]):
+            logger.error("❌ إعدادات التطبيق غير مكتملة!")
+            return
+        
+        # إنشاء تطبيق التليجرام
+        logger.info("🔧 جاري إنشاء تطبيق البوت...")
+        application = ApplicationBuilder().token(config.BOT_TOKEN).build()
+        
+        # استيراد handlers بعد إنشاء التطبيق
+        from handlers import (
+            start_handler,
+            account_handler,
+            deposit_handler,
+            withdraw_handler,
+            callback_handler
+        )
+        
+        # إعداد المعالجات
+        logger.info("🔧 جاري إعداد المعالجات...")
+        
+        # معالجة أمر /start
+        application.add_handler(CommandHandler("start", start_handler.start_handler))
+        
+        # محاولة إضافة الأوامر الأخرى
+        try:
+            application.add_handler(CommandHandler("help", start_handler.help_handler))
+            application.add_handler(CommandHandler("balance", start_handler.balance_handler))
+            application.add_handler(CommandHandler("stats", start_handler.stats_handler))
+        except AttributeError as e:
+            logger.warning(f"⚠️ بعض المعالجات غير متوفرة: {e}")
+        
+        # معالجة إنشاء الحساب
+        application.add_handler(CommandHandler("create_account", account_handler.create_account_handler))
+        
+        # معالجة تعبئة الرصيد
+        application.add_handler(CommandHandler("deposit", deposit_handler.deposit_handler))
+        
+        # معالجة سحب الرصيد
+        application.add_handler(CommandHandler("withdraw", withdraw_handler.withdraw_handler))
+        
+        # معالجة الأزرار (Callback Queries)
+        application.add_handler(CallbackQueryHandler(callback_handler.handle_callback))
+        
+        # معالجة إدخال النصوص
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            handle_text_input
+        ))
+        
+        logger.info("✅ تم إعداد المعالجات بنجاح")
+        
+        # بدء البوت في وضع Polling
+        logger.info("🚀 بدء تشغيل البوت في وضع Polling...")
+        
+        # تشغيل البوت مع إعدادات مبسطة
+        await application.run_polling(
+            drop_pending_updates=True,
+            timeout=20,
+            poll_interval=1.0,
+            allowed_updates=["message", "callback_query"]
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("🛑 تم إيقاف البوت بواسطة المستخدم")
+    except Exception as e:
+        logger.error(f"❌ خطأ غير متوقع: {str(e)}")
+        raise
+    finally:
+        logger.info("👋 إغلاق بوت Ichancy")
+
+async def handle_text_input(update, context):
+    """معالجة إدخال النصوص"""
+    
+    user_id = str(update.effective_user.id)
+    text = update.message.text.strip()
+    
+    try:
+        logger.info(f"📝 إدخال نص من المستخدم {user_id}: {text[:50]}...")
+        
+        # التحقق من حالة إنشاء الحساب
+        from handlers.account_handler import user_states
+        if user_id in user_states:
+            state = user_states[user_id]
+            
+            if state.step == 'username':
+                from handlers.account_handler import handle_username_input
+                await handle_username_input(update, context)
+            elif state.step == 'password':
+                from handlers.account_handler import handle_password_input
+                await handle_password_input(update, context)
+            elif state.step == 'amount':
+                from handlers.account_handler import handle_amount_input
+                await handle_amount_input(update, context)
+            else:
+                await update.message.reply_text(
+                    "❌ حالة غير معروفة، يرجى البدء من جديد باستخدام /start",
+                    parse_mode='Markdown'
+                )
+            return
+        
+        # التحقق من حالة الإيداع
+        from handlers.deposit_handler import deposit_states
+        if user_id in deposit_states:
+            state = deposit_states[user_id]
+            
+            if state.step == 'amount':
+                from handlers.deposit_handler import handle_deposit_amount
+                await handle_deposit_amount(update, context)
+            else:
+                await update.message.reply_text(
+                    "❌ حالة غير معروفة، يرجى البدء من جديد",
+                    parse_mode='Markdown'
+                )
+            return
+        
+        # التحقق من حالة السحب
+        from handlers.withdraw_handler import withdraw_states
+        if user_id in withdraw_states:
+            state = withdraw_states[user_id]
+            
+            if state.step == 'amount':
+                from handlers.withdraw_handler import handle_withdraw_amount
+                await handle_withdraw_amount(update, context)
+            else:
+                await update.message.reply_text(
+                    "❌ حالة غير معروفة، يرجى البدء من جديد",
+                    parse_mode='Markdown'
+                )
+            return
+        
+        # إذا لم يكن هناك حالة نشطة، عرض رسالة مساعدة
+        await update.message.reply_text(
+            "🤖 *مرحباً بك في بوت Ichancy*\n\n"
+            "💡 *الأوامر المتاحة:*\n"
+            "/start - عرض القائمة الرئيسية\n"
+            "/help - عرض دليل الاستخدام\n"
+            "/create_account - إنشاء حساب جديد\n"
+            "/deposit - تعبئة الرصيد\n"
+            "/withdraw - سحب الرصيد\n\n"
+            "📞 للدعم: @TSA_Support",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ فشل معالجة الإدخال النصي للمستخدم {user_id}: {str(e)}")
+        
+        await update.message.reply_text(
+            "❌ حدث خطأ في معالجة طلبك. يرجى المحاولة مرة أخرى.",
+            parse_mode='Markdown'
+        )
+
+if __name__ == "__main__":
+    # تشغيل الدالة الرئيسية
+    try:
+        # إعداد asyncio للمنصات المختلفة
         if sys.platform == 'win32':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         
-        asyncio.run(run_bot())
+        # تشغيل البرنامج
+        asyncio.run(main())
         
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البرنامج بواسطة المستخدم")
     except Exception as e:
-        logger.error(f"❌ خطأ غير متوقع في الدالة الرئيسية: {str(e)}")
+        logger.error(f"❌ خطأ في التشغيل: {str(e)}")
         sys.exit(1)
-
-if __name__ == "__main__":
-    main()
