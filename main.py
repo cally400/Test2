@@ -26,7 +26,7 @@ from telegram import Update
 
 # استيراد المكونات الخاصة بالتطبيق
 from config import config
-from utils.logger import setup_all_loggers
+from utils.logger import setup_logger  # تم التغيير هنا
 from handlers import (
     start_handler,
     account_handler,
@@ -36,10 +36,9 @@ from handlers import (
 )
 from database import db
 from api.ichancy_api import api
-from api.captcha_solver import captcha_solver
 
 # إعداد التسجيل
-logger = setup_all_loggers()
+logger = setup_logger('ichancy_bot')  # تم التغيير هنا
 
 class IchancyBot:
     """فئة رئيسية لإدارة بوت Ichancy"""
@@ -85,9 +84,14 @@ class IchancyBot:
             
             # معالجة أمر /start
             self.application.add_handler(CommandHandler("start", start_handler.start_handler))
-            self.application.add_handler(CommandHandler("help", start_handler.help_handler))
-            self.application.add_handler(CommandHandler("balance", start_handler.balance_handler))
-            self.application.add_handler(CommandHandler("stats", start_handler.stats_handler))
+            
+            # إضافة الأوامر الأخرى إذا كانت موجودة في الملف
+            try:
+                self.application.add_handler(CommandHandler("help", start_handler.help_handler))
+                self.application.add_handler(CommandHandler("balance", start_handler.balance_handler))
+                self.application.add_handler(CommandHandler("stats", start_handler.stats_handler))
+            except AttributeError as e:
+                logger.warning(f"⚠️ بعض المعالجات غير متوفرة: {e}")
             
             # معالجة إنشاء الحساب
             self.application.add_handler(CommandHandler("create_account", account_handler.create_account_handler))
@@ -120,7 +124,7 @@ class IchancyBot:
         text = update.message.text.strip()
         
         try:
-            logger.info(f"📝 إدخال نص من المستخدم {user_id}: {text}")
+            logger.info(f"📝 إدخال نص من المستخدم {user_id}: {text[:50]}...")
             
             # التحقق من حالة إنشاء الحساب
             from handlers.account_handler import user_states
@@ -174,8 +178,6 @@ class IchancyBot:
                 "💡 *الأوامر المتاحة:*\n"
                 "/start - عرض القائمة الرئيسية\n"
                 "/help - عرض دليل الاستخدام\n"
-                "/balance - عرض رصيدك\n"
-                "/stats - عرض إحصائياتك\n"
                 "/create_account - إنشاء حساب جديد\n"
                 "/deposit - تعبئة الرصيد\n"
                 "/withdraw - سحب الرصيد\n\n"
@@ -215,73 +217,6 @@ class IchancyBot:
             self.is_running = False
             raise
     
-    async def start_webhook(self):
-        """بدء البوت في وضع Webhook (لـ Railway)"""
-        
-        try:
-            logger.info("🌐 بدء البوت في وضع Webhook...")
-            
-            self.is_running = True
-            
-            # إعداد المعالجات
-            self.setup_handlers()
-            
-            # إعداد Webhook لـ Railway
-            webhook_url = f"https://{os.getenv('RAILWAY_STATIC_URL', '')}/webhook"
-            if not webhook_url.startswith("https://"):
-                webhook_url = f"https://{webhook_url}"
-            
-            logger.info(f"🔗 جاري إعداد Webhook: {webhook_url}")
-            
-            # ضبط Webhook
-            await self.application.bot.set_webhook(
-                url=webhook_url,
-                certificate=None,
-                max_connections=40,
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True
-            )
-            
-            # بدء Webhook
-            await self.application.run_webhook(
-                listen="0.0.0.0",
-                port=config.PORT,
-                url_path="webhook",
-                webhook_url=webhook_url,
-                drop_pending_updates=True
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ فشل بدء Webhook: {str(e)}")
-            self.is_running = False
-            raise
-    
-    def get_bot_info(self):
-        """الحصول على معلومات البوت"""
-        
-        if not self.application or not self.application.bot:
-            return {
-                "status": "غير نشط",
-                "username": "غير معروف",
-                "start_time": str(self.start_time) if self.start_time else "غير معروف"
-            }
-        
-        try:
-            bot_info = self.application.bot.get_me()
-            
-            return {
-                "status": "نشط" if self.is_running else "متوقف",
-                "username": bot_info.username,
-                "first_name": bot_info.first_name,
-                "id": bot_info.id,
-                "start_time": str(self.start_time) if self.start_time else "غير معروف",
-                "uptime": str(datetime.now() - self.start_time) if self.start_time else "غير معروف"
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ فشل جلب معلومات البوت: {str(e)}")
-            return {"status": "خطأ", "error": str(e)}
-    
     async def cleanup(self):
         """تنظيف الموارد قبل الإغلاق"""
         
@@ -289,12 +224,6 @@ class IchancyBot:
             logger.info("🧹 جاري تنظيف الموارد...")
             
             self.is_running = False
-            
-            # إغلاق اتصالات قاعدة البيانات
-            logger.info("🗄️ جاري إغلاق اتصالات قاعدة البيانات...")
-            
-            # إغلاق جلسات API
-            logger.info("🌐 جاري إغلاق جلسات API...")
             
             logger.info("✅ تم التنظيف بنجاح")
             
@@ -312,13 +241,9 @@ async def run_bot():
             logger.error("❌ فشل تهيئة البوت، جاري الإغلاق...")
             return
         
-        # التحقق من البيئة وتشغيل الوضع المناسب
-        if config.IS_PRODUCTION:
-            logger.info("⚡ جاري التشغيل في وضع الإنتاج (Webhook)")
-            await bot.start_webhook()
-        else:
-            logger.info("🛠️ جاري التشغيل في وضع التطوير (Polling)")
-            await bot.start_polling()
+        # تشغيل في وضع Polling (للتجربة)
+        logger.info("🛠️ جاري التشغيل في وضع Polling")
+        await bot.start_polling()
             
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البوت بواسطة المستخدم")
@@ -336,106 +261,6 @@ def signal_handler(signum, frame):
     logger.info(f"📡 استلام إشارة النظام: {signum}")
     sys.exit(0)
 
-async def health_check():
-    """فحص صحة النظام"""
-    
-    try:
-        health_status = {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "components": {}
-        }
-        
-        # فحص قاعدة البيانات
-        try:
-            test_balance = db.get_user_balance("system_test")
-            health_status["components"]["database"] = {
-                "status": "healthy",
-                "message": "Connected successfully"
-            }
-        except Exception as e:
-            health_status["components"]["database"] = {
-                "status": "unhealthy",
-                "message": str(e)
-            }
-            health_status["status"] = "degraded"
-        
-        # فحص Ichancy API
-        try:
-            login_result = api.login()
-            health_status["components"]["ichancy_api"] = {
-                "status": "healthy" if login_result.get('success') else "unhealthy",
-                "message": login_result.get('error', 'Connected successfully')
-            }
-            
-            if not login_result.get('success'):
-                health_status["status"] = "degraded"
-                
-        except Exception as e:
-            health_status["components"]["ichancy_api"] = {
-                "status": "unhealthy",
-                "message": str(e)
-            }
-            health_status["status"] = "degraded"
-        
-        # فحص البوت
-        bot = IchancyBot()
-        bot_info = bot.get_bot_info()
-        health_status["components"]["telegram_bot"] = {
-            "status": bot_info.get("status", "unknown"),
-            "username": bot_info.get("username", "unknown"),
-            "uptime": bot_info.get("uptime", "unknown")
-        }
-        
-        if bot_info.get("status") != "نشط":
-            health_status["status"] = "degraded"
-        
-        return health_status
-        
-    except Exception as e:
-        logger.error(f"❌ فشل فحص الصحة: {str(e)}")
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
-
-def run_health_server():
-    """تشغيل خادم فحص الصحة البسيط"""
-    
-    try:
-        import http.server
-        import socketserver
-        import json
-        
-        class HealthHandler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path == '/health':
-                    # فحص الصحة بشكل متزامن
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    health_status = loop.run_until_complete(health_check())
-                    loop.close()
-                    
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps(health_status, ensure_ascii=False).encode())
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-            
-            def log_message(self, format, *args):
-                logger.debug(f"🌐 Health Server: {format % args}")
-        
-        port = int(os.getenv("HEALTH_CHECK_PORT", 8080))
-        with socketserver.TCPServer(("0.0.0.0", port), HealthHandler) as httpd:
-            logger.info(f"🏥 خادم فحص الصحة يعمل على المنفذ {port}")
-            httpd.serve_forever()
-            
-    except Exception as e:
-        logger.error(f"❌ فشل تشغيل خادم فحص الصحة: {str(e)}")
-
 def main():
     """الدالة الرئيسية للتشغيل"""
     
@@ -448,14 +273,7 @@ def main():
         logger.info("🚀 بدء تشغيل بوت Ichancy")
         logger.info(f"📅 وقت البدء: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"🌐 البيئة: {config.RAILWAY_ENVIRONMENT}")
-        logger.info(f"⚙️ الوضع: {'إنتاج ⚡' if config.IS_PRODUCTION else 'تطوير 🛠️'}")
         logger.info("=" * 60)
-        
-        # تشغيل خادم فحص الصحة في خيط منفصل
-        if config.IS_PRODUCTION:
-            health_thread = Thread(target=run_health_server, daemon=True)
-            health_thread.start()
-            logger.info("✅ تم تشغيل خادم فحص الصحة")
         
         # تشغيل البوت
         asyncio.run(run_bot())
