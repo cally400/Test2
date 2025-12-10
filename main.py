@@ -1,5 +1,6 @@
+# main.py
 """
-الملف الرئيسي لتشغيل بوت Ichancy على Railway - النسخة النهائية
+الملف الرئيسي لتشغيل بوت Ichancy على Railway - نسخة مستقرة
 """
 
 import os
@@ -11,9 +12,8 @@ from datetime import datetime
 # إضافة المسار الحالي للمسارات
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
-from telegram.error import TelegramError
-import config
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from config import config
 from utils.logger import setup_logger
 
 # إعداد التسجيل
@@ -36,10 +36,16 @@ async def main():
         
         # إنشاء تطبيق التليجرام
         logger.info("🔧 جاري إنشاء تطبيق البوت...")
-        application = Application.builder().token(config.BOT_TOKEN).build()
+        application = ApplicationBuilder().token(config.BOT_TOKEN).build()
         
         # استيراد handlers بعد إنشاء التطبيق
-        from handlers import start_handler, account_handler, deposit_handler, withdraw_handler, callback_handler
+        from handlers import (
+            start_handler,
+            account_handler,
+            deposit_handler,
+            withdraw_handler,
+            callback_handler
+        )
         
         # إعداد المعالجات
         logger.info("🔧 جاري إعداد المعالجات...")
@@ -78,19 +84,19 @@ async def main():
         # بدء البوت في وضع Polling
         logger.info("🚀 بدء تشغيل البوت في وضع Polling...")
         
-        # تشغيل البوت - الطريقة الصحيحة لـ PTB v20+
+        # تشغيل البوت مع إعدادات مبسطة
         await application.run_polling(
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"],
-            close_loop=False  # مهم جداً! لا تغلق loop تلقائياً
+            timeout=20,
+            poll_interval=1.0,
+            allowed_updates=["message", "callback_query"]
         )
         
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البوت بواسطة المستخدم")
     except Exception as e:
         logger.error(f"❌ خطأ غير متوقع: {str(e)}")
-        import traceback
-        logger.error(f"🔍 تفاصيل الخطأ:\n{traceback.format_exc()}")
+        raise
     finally:
         logger.info("👋 إغلاق بوت Ichancy")
 
@@ -176,19 +182,17 @@ async def handle_text_input(update, context):
         )
 
 if __name__ == "__main__":
-    # تشغيل البرنامج مع معالجة استثناءات asyncio
+    # تشغيل الدالة الرئيسية
     try:
         # إعداد asyncio للمنصات المختلفة
         if sys.platform == 'win32':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         
-        # تشغيل البرنامج الرئيسي
+        # تشغيل البرنامج
         asyncio.run(main())
         
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البرنامج بواسطة المستخدم")
     except Exception as e:
         logger.error(f"❌ خطأ في التشغيل: {str(e)}")
-        import traceback
-        logger.error(f"🔍 تفاصيل الخطأ:\n{traceback.format_exc()}")
         sys.exit(1)
