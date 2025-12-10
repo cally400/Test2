@@ -1,6 +1,5 @@
-# main.py
 """
-الملف الرئيسي لتشغيل بوت Ichancy على Railway - نسخة مستقرة
+الملف الرئيسي لتشغيل بوت Ichancy على Railway - نسخة مستقلة
 """
 
 import os
@@ -12,14 +11,15 @@ from datetime import datetime
 # إضافة المسار الحالي للمسارات
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
-from config import config
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram.error import TelegramError
+import config
 from utils.logger import setup_logger
 
 # إعداد التسجيل
 logger = setup_logger('ichancy_bot')
 
-async def main():
+def main():
     """الدالة الرئيسية التشغيلية"""
     
     try:
@@ -32,20 +32,14 @@ async def main():
         # التحقق من إعدادات التطبيق
         if not all([config.BOT_TOKEN, config.AGENT_USERNAME, config.AGENT_PASSWORD]):
             logger.error("❌ إعدادات التطبيق غير مكتملة!")
-            return
+            sys.exit(1)
         
         # إنشاء تطبيق التليجرام
         logger.info("🔧 جاري إنشاء تطبيق البوت...")
-        application = ApplicationBuilder().token(config.BOT_TOKEN).build()
+        application = Application.builder().token(config.BOT_TOKEN).build()
         
         # استيراد handlers بعد إنشاء التطبيق
-        from handlers import (
-            start_handler,
-            account_handler,
-            deposit_handler,
-            withdraw_handler,
-            callback_handler
-        )
+        from handlers import start_handler, account_handler, deposit_handler, withdraw_handler, callback_handler
         
         # إعداد المعالجات
         logger.info("🔧 جاري إعداد المعالجات...")
@@ -84,21 +78,18 @@ async def main():
         # بدء البوت في وضع Polling
         logger.info("🚀 بدء تشغيل البوت في وضع Polling...")
         
-        # تشغيل البوت مع إعدادات مبسطة
-        await application.run_polling(
+        # تشغيل البوت - الطريقة الصحيحة لـ PTB v20+
+        application.run_polling(
             drop_pending_updates=True,
-            timeout=20,
-            poll_interval=1.0,
             allowed_updates=["message", "callback_query"]
         )
         
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البوت بواسطة المستخدم")
+        sys.exit(0)
     except Exception as e:
         logger.error(f"❌ خطأ غير متوقع: {str(e)}")
-        raise
-    finally:
-        logger.info("👋 إغلاق بوت Ichancy")
+        sys.exit(1)
 
 async def handle_text_input(update, context):
     """معالجة إدخال النصوص"""
@@ -182,17 +173,5 @@ async def handle_text_input(update, context):
         )
 
 if __name__ == "__main__":
-    # تشغيل الدالة الرئيسية
-    try:
-        # إعداد asyncio للمنصات المختلفة
-        if sys.platform == 'win32':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
-        # تشغيل البرنامج
-        asyncio.run(main())
-        
-    except KeyboardInterrupt:
-        logger.info("🛑 تم إيقاف البرنامج بواسطة المستخدم")
-    except Exception as e:
-        logger.error(f"❌ خطأ في التشغيل: {str(e)}")
-        sys.exit(1)
+    # تشغيل البرنامج
+    main()
