@@ -1,5 +1,5 @@
 """
-الملف الرئيسي لتشغيل بوت Ichancy على Railway - نسخة مستقلة
+الملف الرئيسي لتشغيل بوت Ichancy على Railway - النسخة النهائية
 """
 
 import os
@@ -19,7 +19,7 @@ from utils.logger import setup_logger
 # إعداد التسجيل
 logger = setup_logger('ichancy_bot')
 
-def main():
+async def main():
     """الدالة الرئيسية التشغيلية"""
     
     try:
@@ -32,7 +32,7 @@ def main():
         # التحقق من إعدادات التطبيق
         if not all([config.BOT_TOKEN, config.AGENT_USERNAME, config.AGENT_PASSWORD]):
             logger.error("❌ إعدادات التطبيق غير مكتملة!")
-            sys.exit(1)
+            return
         
         # إنشاء تطبيق التليجرام
         logger.info("🔧 جاري إنشاء تطبيق البوت...")
@@ -79,17 +79,20 @@ def main():
         logger.info("🚀 بدء تشغيل البوت في وضع Polling...")
         
         # تشغيل البوت - الطريقة الصحيحة لـ PTB v20+
-        application.run_polling(
+        await application.run_polling(
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"]
+            allowed_updates=["message", "callback_query"],
+            close_loop=False  # مهم جداً! لا تغلق loop تلقائياً
         )
         
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البوت بواسطة المستخدم")
-        sys.exit(0)
     except Exception as e:
         logger.error(f"❌ خطأ غير متوقع: {str(e)}")
-        sys.exit(1)
+        import traceback
+        logger.error(f"🔍 تفاصيل الخطأ:\n{traceback.format_exc()}")
+    finally:
+        logger.info("👋 إغلاق بوت Ichancy")
 
 async def handle_text_input(update, context):
     """معالجة إدخال النصوص"""
@@ -173,5 +176,19 @@ async def handle_text_input(update, context):
         )
 
 if __name__ == "__main__":
-    # تشغيل البرنامج
-    main()
+    # تشغيل البرنامج مع معالجة استثناءات asyncio
+    try:
+        # إعداد asyncio للمنصات المختلفة
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
+        # تشغيل البرنامج الرئيسي
+        asyncio.run(main())
+        
+    except KeyboardInterrupt:
+        logger.info("🛑 تم إيقاف البرنامج بواسطة المستخدم")
+    except Exception as e:
+        logger.error(f"❌ خطأ في التشغيل: {str(e)}")
+        import traceback
+        logger.error(f"🔍 تفاصيل الخطأ:\n{traceback.format_exc()}")
+        sys.exit(1)
